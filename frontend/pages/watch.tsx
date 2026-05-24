@@ -35,6 +35,8 @@ export default function WatchPage() {
   const [fileData, setFileData] = useState<FileData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [buffering, setBuffering] = useState(false);
+  const [bufferPercent, setBufferPercent] = useState(0);
 
   // Fetch video data from backend
   useEffect(() => {
@@ -66,6 +68,7 @@ export default function WatchPage() {
 
     const initPlayer = async () => {
       const videojs = (await import('video.js')).default;
+      await import('videojs-http-source-selector');
       if (playerInstance.current) {
         playerInstance.current.dispose();
       }
@@ -115,44 +118,43 @@ export default function WatchPage() {
       }))
   : [],
       });
-      playerInstance.current.on('error', async () => {
-  console.warn('Stream error detected');
 
-  try {
-    const response = await fetch('/api/resolve', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        url: decodeURIComponent(url as string),
-      }),
-    });
-
-    const refreshed = await response.json();
-
-    if (refreshed?.streamUrl) {
-      playerInstance.current.src({
-        src: refreshed.streamUrl,
-        type: 'application/x-mpegURL',
-      });
-
-      await playerInstance.current.play();
-    }
-  } catch (err) {
-    console.error('Failed to refresh stream:', err);
-  }
+      playerInstance.current.ready(() => {
+  playerInstance.current.httpSourceSelector({
+    default: 'auto',
+  });
 });
-playerInstance.current.on('stalled', () => {
-  console.warn('Playback stalled');
-
-  setTimeout(() => {
-    playerInstance.current.play();
-  }, 1000);
-});
+      
 
 playerInstance.current.on('waiting', () => {
-  console.log('Buffering...');
+  setBuffering(true);
+
+  const interval = setInterval(() => {
+    const player = playerInstance.current;
+
+    if (!player) return;
+
+    const buffered = player.bufferedEnd();
+    const duration = player.duration();
+
+    if (duration > 0) {
+      const percent = Math.min(
+        100,
+        Math.floor((buffered / duration) * 100)
+      );
+
+      setBufferPercent(percent);
+
+      if (percent >= 100) {
+        clearInterval(interval);
+      }
+    }
+  }, 300);
+});
+
+playerInstance.current.on('playing', () => {
+  setBuffering(false);
+  setBufferPercent(0);
 });
     };
 
@@ -213,7 +215,24 @@ playerInstance.current.on('waiting', () => {
           {fileData && !loading && (
             <>
               {/* Player */}
-              <div className="player-wrapper" ref={playerRef} />
+              <div className="player-container">
+  <div className="player-wrapper" ref={playerRef} />
+
+  {buffering && (
+    <div className="buffer-box">
+      <div className="buffer-percent">
+        {bufferPercent}%
+      </div>
+
+      <div className="buffer-bar">
+        <div
+          className="buffer-fill"
+          style={{ width: `${bufferPercent}%` }}
+        />
+      </div>
+    </div>
+  )}
+</div>
 
               {/* File info */}
               <div className="player-info">
@@ -297,7 +316,51 @@ playerInstance.current.on('waiting', () => {
         .vjs-theme-custom .vjs-play-progress {
           background: #6C47FF !important;
         }
-      `}</style>
+
+
+
+        .player-container {
+  position: relative;
+}
+
+.buffer-box {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 220px;
+  padding: 20px;
+  border-radius: 20px;
+  background: rgba(0,0,0,0.75);
+  backdrop-filter: blur(14px);
+  z-index: 9999;
+}
+
+.buffer-percent {
+  color: white;
+  font-size: 28px;
+  font-weight: 700;
+  text-align: center;
+  margin-bottom: 14px;
+}
+
+.buffer-bar {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.15);
+  overflow: hidden;
+}
+
+.buffer-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: #6C47FF;
+  transition: width 0.3s ease;
+}
+      `}
+      
+      </style>
     </>
   );
 }
