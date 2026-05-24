@@ -165,6 +165,7 @@ export async function resolveTeraBoxUrl(url: string): Promise<ResolvedFile> {
   }
 
   const apiData = (await response.json()) as TeraBoxApiResponse;
+  console.log('API RESPONSE:', JSON.stringify(apiData, null, 2));
 
   // 3. Normalize API response
   const qualities = Object.entries(
