@@ -59,11 +59,6 @@ export default function HeroSection() {
           Instantly Online
         </h1>
 
-        <p className="hero-description">
-          Paste your TeraBox share link and watch in HD or 4K — no downloads required. 
-          The fastest cloud media streaming experience available.
-        </p>
-
         {/* Input Box */}
         <div className="hero-input-wrapper">
           <div className="input-box">
