@@ -35,9 +35,6 @@ export default function WatchPage() {
   const [fileData, setFileData] = useState<FileData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [buffering, setBuffering] = useState(false);
-  const [bufferPercent, setBufferPercent] = useState(0);
-  const [selectedQuality, setSelectedQuality] = useState('Auto');
 
   // Fetch video data from backend
   useEffect(() => {
@@ -118,37 +115,44 @@ export default function WatchPage() {
       }))
   : [],
       });
-      
+      playerInstance.current.on('error', async () => {
+  console.warn('Stream error detected');
 
-playerInstance.current.on('waiting', () => {
-  setBuffering(true);
+  try {
+    const response = await fetch('/api/resolve', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        url: decodeURIComponent(url as string),
+      }),
+    });
 
-  const interval = setInterval(() => {
-    const player = playerInstance.current;
+    const refreshed = await response.json();
 
-    if (!player) return;
+    if (refreshed?.streamUrl) {
+      playerInstance.current.src({
+        src: refreshed.streamUrl,
+        type: 'application/x-mpegURL',
+      });
 
-    const buffered = player.bufferedEnd();
-    const duration = player.duration();
-
-    if (duration > 0) {
-      const percent = Math.min(
-        100,
-        Math.floor((buffered / duration) * 100)
-      );
-
-      setBufferPercent(percent);
-
-      if (percent >= 100) {
-        clearInterval(interval);
-      }
+      await playerInstance.current.play();
     }
-  }, 300);
+  } catch (err) {
+    console.error('Failed to refresh stream:', err);
+  }
+});
+playerInstance.current.on('stalled', () => {
+  console.warn('Playback stalled');
+
+  setTimeout(() => {
+    playerInstance.current.play();
+  }, 1000);
 });
 
-playerInstance.current.on('playing', () => {
-  setBuffering(false);
-  setBufferPercent(0);
+playerInstance.current.on('waiting', () => {
+  console.log('Buffering...');
 });
     };
 
@@ -209,66 +213,9 @@ playerInstance.current.on('playing', () => {
           {fileData && !loading && (
             <>
               {/* Player */}
-              <div className="player-container">
-  <div className="player-wrapper" ref={playerRef} />
-
-  {buffering && (
-    <div className="buffer-box">
-      <div className="buffer-percent">
-        {bufferPercent}%
-      </div>
-
-      <div className="buffer-bar">
-        <div
-          className="buffer-fill"
-          style={{ width: `${bufferPercent}%` }}
-        />
-      </div>
-    </div>
-  )}
-</div>
+              <div className="player-wrapper" ref={playerRef} />
 
               {/* File info */}
-              <div className="quality-selector">
-  <select
-    value={selectedQuality}
-    onChange={(e) => {
-      const quality = e.target.value;
-
-      setSelectedQuality(quality);
-
-      if (!playerInstance.current) return;
-
-      if (quality === 'Auto') {
-        playerInstance.current.src({
-          src: fileData.streamUrl,
-          type: 'application/x-mpegURL',
-        });
-      } else {
-        const selected = fileData.qualities?.find(
-          (q) => q.label === quality
-        );
-
-        if (selected) {
-          playerInstance.current.src({
-            src: selected.url,
-            type: 'application/x-mpegURL',
-          });
-        }
-      }
-
-      playerInstance.current.play();
-    }}
-  >
-    <option value="Auto">Auto</option>
-
-    {fileData.qualities?.map((q) => (
-      <option key={q.label} value={q.label}>
-        {q.label}
-      </option>
-    ))}
-  </select>
-</div>
               <div className="player-info">
                 <h1 className="file-title">{fileData.title}</h1>
                 <div className="file-meta">
@@ -350,51 +297,7 @@ playerInstance.current.on('playing', () => {
         .vjs-theme-custom .vjs-play-progress {
           background: #6C47FF !important;
         }
-
-
-
-        .player-container {
-  position: relative;
-}
-
-.buffer-box {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  width: 220px;
-  padding: 20px;
-  border-radius: 20px;
-  background: rgba(0,0,0,0.75);
-  backdrop-filter: blur(14px);
-  z-index: 9999;
-}
-
-.buffer-percent {
-  color: white;
-  font-size: 28px;
-  font-weight: 700;
-  text-align: center;
-  margin-bottom: 14px;
-}
-
-.buffer-bar {
-  width: 100%;
-  height: 10px;
-  border-radius: 999px;
-  background: rgba(255,255,255,0.15);
-  overflow: hidden;
-}
-
-.buffer-fill {
-  height: 100%;
-  border-radius: 999px;
-  background: #6C47FF;
-  transition: width 0.3s ease;
-}
-      `}
-      
-      </style>
+      `}</style>
     </>
   );
 }
