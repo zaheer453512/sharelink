@@ -164,12 +164,15 @@ export async function resolveTeraBoxUrl(url: string): Promise<ResolvedFile> {
     throw new Error(`API error ${response.status}: ${errBody || 'Unknown error'}`);
   }
 
-  const apiData = (await response.json()) as TeraBoxApiResponse;
-  console.log('API RESPONSE:', JSON.stringify(apiData, null, 2));
+ const apiResponse: any = await response.json();
+
+console.log('API RESPONSE:', JSON.stringify(apiResponse, null, 2));
+
+const fileData = apiResponse.list?.[0] || apiResponse;
 
   // 3. Normalize API response
   const qualities = Object.entries(
-  apiData.fast_stream_url || {}
+  fileData.fast_stream_url || {}
 ).map(([label, url]) => ({
   label,
   url: String(url),
@@ -178,31 +181,32 @@ export async function resolveTeraBoxUrl(url: string): Promise<ResolvedFile> {
 const result: ResolvedFile = {
   // Basic Metadata
   title:
-    apiData.file_name ||
-    apiData.title ||
-    'Untitled Video',
+  fileData.file_name ||
+  fileData.name ||
+  fileData.title ||
+  'Untitled Video',
 
   size: formatBytes(
-    apiData.file_size ||
-    apiData.size ||
+    fileData.file_size ||
+    fileData.size ||
     0
   ),
 
   resolution:
-    apiData.resolution ||
-    apiData.video_quality ||
+    fileData.resolution ||
+    fileData.video_quality ||
     qualities[qualities.length - 1]?.label ||
     '',
 
   duration: formatDuration(
-    apiData.duration ||
-    apiData.video_duration ||
+    fileData.duration ||
+    fileData.video_duration ||
     0
   ),
 
   thumbnail:
-    apiData.thumbnail ||
-    apiData.thumb ||
+    fileData.thumbnail ||
+    fileData.thumb ||
     '',
 
   // Main Streaming URL
@@ -211,9 +215,9 @@ const result: ResolvedFile = {
     qualities.find(q => q.label === '720p')?.url ||
     qualities.find(q => q.label === '480p')?.url ||
     qualities.find(q => q.label === '360p')?.url ||
-    apiData.stream_url ||
-    apiData.hls_url ||
-    apiData.video_url ||
+    fileData.stream_url ||
+    fileData.hls_url ||
+    fileData.video_url ||
     '',
 
   // Available Stream Qualities
@@ -221,13 +225,15 @@ const result: ResolvedFile = {
 
   // Download URLs
   downloadUrl:
-    apiData.download_url ||
-    apiData.direct_url ||
-    '',
+  fileData.download_url ||
+  fileData.direct_url ||
+  fileData.normal_dlink ||
+  fileData.zip_dlink ||
+  '',
 
   // Subtitle Tracks
-  subtitles: Array.isArray(apiData.subtitles)
-    ? apiData.subtitles
+  subtitles: Array.isArray(fileData.subtitles)
+    ? fileData.subtitles
         .filter((s: any) => s?.url || s?.src)
         .map((s: any) => ({
           label:
