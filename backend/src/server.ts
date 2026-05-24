@@ -5,7 +5,7 @@ import helmet from '@fastify/helmet';
 import Redis from 'ioredis';
 import { resolveRoute } from './routes/resolve';
 import { downloadRoute } from './routes/download';
-import { healthRoute } from './routes/health';
+import healthRoute from './routes/health';
 
 const app = Fastify({
   logger: {
@@ -23,7 +23,7 @@ export const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379'
 });
 
 redis.on('error', (err) => {
-  app.log.error('Redis connection error:', err);
+  app.log.error(err, 'Redis connection error');
 });
 
 redis.on('connect', () => {
