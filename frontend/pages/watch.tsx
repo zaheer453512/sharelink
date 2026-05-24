@@ -37,6 +37,7 @@ export default function WatchPage() {
   const [error, setError] = useState('');
   const [buffering, setBuffering] = useState(false);
   const [bufferPercent, setBufferPercent] = useState(0);
+  const [selectedQuality, setSelectedQuality] = useState('Auto');
 
   // Fetch video data from backend
   useEffect(() => {
@@ -68,7 +69,6 @@ export default function WatchPage() {
 
     const initPlayer = async () => {
       const videojs = (await import('video.js')).default;
-      await import('videojs-http-source-selector');
       if (playerInstance.current) {
         playerInstance.current.dispose();
       }
@@ -99,12 +99,12 @@ export default function WatchPage() {
   ? fileData.qualities.map((q) => ({
       src: q.url,
       label: q.label,
-      type: 'application/x-mpegURL',
+      type: 'video/mp4',
     }))
   : [
       {
         src: fileData.streamUrl,
-        type: 'application/x-mpegURL',
+        type: 'video/mp4',
       },
     ],
         tracks: Array.isArray(fileData.subtitles)
@@ -118,12 +118,6 @@ export default function WatchPage() {
       }))
   : [],
       });
-
-      playerInstance.current.ready(() => {
-  playerInstance.current.httpSourceSelector({
-    default: 'auto',
-  });
-});
       
 
 playerInstance.current.on('waiting', () => {
@@ -235,6 +229,46 @@ playerInstance.current.on('playing', () => {
 </div>
 
               {/* File info */}
+              <div className="quality-selector">
+  <select
+    value={selectedQuality}
+    onChange={(e) => {
+      const quality = e.target.value;
+
+      setSelectedQuality(quality);
+
+      if (!playerInstance.current) return;
+
+      if (quality === 'Auto') {
+        playerInstance.current.src({
+          src: fileData.streamUrl,
+          type: 'video/mp4',
+        });
+      } else {
+        const selected = fileData.qualities?.find(
+          (q) => q.label === quality
+        );
+
+        if (selected) {
+          playerInstance.current.src({
+            src: selected.url,
+            type: 'video/mp4',
+          });
+        }
+      }
+
+      playerInstance.current.play();
+    }}
+  >
+    <option value="Auto">Auto</option>
+
+    {fileData.qualities?.map((q) => (
+      <option key={q.label} value={q.label}>
+        {q.label}
+      </option>
+    ))}
+  </select>
+</div>
               <div className="player-info">
                 <h1 className="file-title">{fileData.title}</h1>
                 <div className="file-meta">
