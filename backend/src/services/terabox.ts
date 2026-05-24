@@ -198,11 +198,10 @@ const result: ResolvedFile = {
     qualities[qualities.length - 1]?.label ||
     '',
 
-  duration: formatDuration(
-    fileData.duration ||
-    fileData.video_duration ||
-    0
-  ),
+  duration:
+  typeof fileData.duration === 'string'
+    ? fileData.duration
+    : formatDuration(fileData.video_duration || 0),
 
   thumbnail:
     fileData.thumbnail ||
