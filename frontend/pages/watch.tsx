@@ -99,12 +99,12 @@ export default function WatchPage() {
   ? fileData.qualities.map((q) => ({
       src: q.url,
       label: q.label,
-      type: 'video/mp4',
+      type: 'application/x-mpegURL',
     }))
   : [
       {
         src: fileData.streamUrl,
-        type: 'video/mp4',
+        type: 'application/x-mpegURL',
       },
     ],
         tracks: Array.isArray(fileData.subtitles)
@@ -242,7 +242,7 @@ playerInstance.current.on('playing', () => {
       if (quality === 'Auto') {
         playerInstance.current.src({
           src: fileData.streamUrl,
-          type: 'video/mp4',
+          type: 'application/x-mpegURL',
         });
       } else {
         const selected = fileData.qualities?.find(
@@ -252,7 +252,7 @@ playerInstance.current.on('playing', () => {
         if (selected) {
           playerInstance.current.src({
             src: selected.url,
-            type: 'video/mp4',
+            type: 'application/x-mpegURL',
           });
         }
       }
