@@ -96,12 +96,16 @@ export default function WatchPage() {
   ? fileData.qualities.map((q) => ({
       src: q.url,
       label: q.label,
-      type: 'application/x-mpegURL',
+      type: q.url.includes('.m3u8')
+        ? 'application/x-mpegURL'
+        : 'video/mp4',
     }))
   : [
       {
         src: fileData.streamUrl,
-        type: 'application/x-mpegURL',
+        type: fileData.streamUrl.includes('.m3u8')
+          ? 'application/x-mpegURL'
+          : 'video/mp4',
       },
     ],
         tracks: Array.isArray(fileData.subtitles)
@@ -134,7 +138,9 @@ export default function WatchPage() {
     if (refreshed?.streamUrl) {
       playerInstance.current.src({
         src: refreshed.streamUrl,
-        type: 'application/x-mpegURL',
+        type: refreshed.streamUrl.includes('.m3u8')
+  ? 'application/x-mpegURL'
+  : 'video/mp4',
       });
 
       await playerInstance.current.play();
