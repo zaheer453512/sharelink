@@ -132,7 +132,6 @@ export default function WatchPage() {
     if (!fileData || !containerRef.current) return;
 
     let destroyed = false;
-    let stallTimer: ReturnType<typeof setTimeout> | null = null;
 
     const initPlayer = async () => {
       const { default: videojs } = await import('video.js');
@@ -149,14 +148,21 @@ export default function WatchPage() {
       const videoEl = document.createElement('video');
       videoEl.className = 'video-js vjs-big-play-centered';
       videoEl.setAttribute('controls', '');
-      videoEl.setAttribute('preload', 'auto');
+      videoEl.setAttribute('preload', 'metadata');
       videoEl.setAttribute('playsinline', '');
       if (fileData.thumbnail) videoEl.setAttribute('poster', fileData.thumbnail);
       containerRef.current!.appendChild(videoEl);
 
       const sources = fileData.qualities?.length
-        ? fileData.qualities.map((q) => ({ src: q.url, type: getMimeType(q.url), label: q.label }))
-        : [{ src: fileData.streamUrl, type: getMimeType(fileData.streamUrl) }];
+  ? fileData.qualities.map((q) => ({
+      src: `/api/proxy?url=${encodeURIComponent(q.url)}`,
+      type: getMimeType(q.url),
+      label: q.label
+    }))
+  : [{
+      src: `/api/proxy?url=${encodeURIComponent(fileData.streamUrl)}`,
+      type: getMimeType(fileData.streamUrl)
+    }];
 
       const tracks = Array.isArray(fileData.subtitles)
         ? fileData.subtitles
@@ -171,17 +177,10 @@ export default function WatchPage() {
         fluid: true,
         playbackRates: [0.5, 0.75, 1, 1.25, 1.5, 2],
         html5: {
-          vhs: {
-            overrideNative: true,
-            enableLowInitialPlaylist: true,   // start with low quality on slow net
-            smoothQualityChange: true,
-            bandwidth: 500000,                 // initial bandwidth estimate
-            limitRenditionByPlayerDimensions: true,
-          },
-          nativeVideoTracks: false,
-          nativeAudioTracks: false,
-          nativeTextTracks: false,
-        },
+  nativeVideoTracks: true,
+  nativeAudioTracks: true,
+  nativeTextTracks: true,
+},
         sources,
         tracks,
       });
@@ -200,28 +199,28 @@ export default function WatchPage() {
       player.on('waiting',  () => { if (!destroyed) { setIsBuffering(true);  updateBuffer(); } });
       player.on('playing',  () => {
         if (!destroyed) setIsBuffering(false);
-        if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
       });
       player.on('canplay',  () => { if (!destroyed) setIsBuffering(false); });
       player.on('progress', () => { updateBuffer(); });
 
       // ── Stall recovery ──
-      player.on('stalled', () => {
-        console.warn('Stalled — retry in 2 s');
-        stallTimer = setTimeout(() => {
-          if (!destroyed) player.play().catch(() => {});
-        }, 2000);
-      });
+      
 
       // ── Error + stream refresh ──
-      player.on('error', async () => {
+      let retried = false;
+      player.on('error' , async () => {
         const vjsError = player.error();
         console.warn('VJS error:', vjsError?.code, vjsError?.message);
         if (vjsError?.code === 2 || vjsError?.code === 4) {
+          if (retried) return;
+               retried = true;
           const freshUrl = await refreshStream();
           if (freshUrl && !destroyed) {
             player.error(null);
-            player.src({ src: freshUrl, type: getMimeType(freshUrl) });
+            player.src({
+  src: `/api/proxy?url=${encodeURIComponent(freshUrl)}`,
+  type: getMimeType(freshUrl)
+});
             player.load();
             try { await player.play(); } catch {}
           }
@@ -243,7 +242,6 @@ export default function WatchPage() {
 
     return () => {
       destroyed = true;
-      if (stallTimer) clearTimeout(stallTimer);
       if (playerRef.current) {
         try { playerRef.current.dispose(); } catch {}
         playerRef.current = null;
@@ -261,7 +259,10 @@ export default function WatchPage() {
     if (label === 'Auto') {
       setManualQuality(false);
       // Restore original source so VHS picks quality adaptively
-      player.src({ src: fileData.streamUrl, type: getMimeType(fileData.streamUrl) });
+      player.src({
+  src: `/api/proxy?url=${encodeURIComponent(fileData.streamUrl)}`,
+  type: getMimeType(fileData.streamUrl)
+});
       player.play().catch(() => {});
       return;
     }
@@ -272,7 +273,10 @@ export default function WatchPage() {
     const match = fileData.qualities?.find((q) => q.label === label);
     if (match) {
       const currentTime = player.currentTime();
-      player.src({ src: match.url, type: getMimeType(match.url) });
+      player.src({
+  src: `/api/proxy?url=${encodeURIComponent(match.url)}`,
+  type: getMimeType(match.url)
+});
       player.currentTime(currentTime);
       player.play().catch(() => {});
       return;
