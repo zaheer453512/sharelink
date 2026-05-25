@@ -1,66 +1,56 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import axios from 'axios';
 
-export default async function handler(
-  req: NextApiRequest,
-  res: NextApiResponse
-) {
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  const { url } = req.query;
+
+  if (!url || typeof url !== 'string') {
+    return res.status(400).json({ error: 'Missing stream URL' });
+  }
+
   try {
+    const targetUrl = decodeURIComponent(url);
 
-    const url = req.query.url as string;
+    const response = await fetch(targetUrl, {
+      headers: {
+        'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Range': req.headers.range || '',
+        'Accept': 'video/*, audio/*',
+      },
+      redirect: 'follow',
+    });
 
-    if (!url) {
-      return res.status(400).json({
-        error: 'Missing URL'
-      });
+    if (!response.ok) {
+      return res.status(response.status).end();
     }
 
-    const response = await axios({
-      method: 'GET',
-      url,
-      responseType: 'stream',
-
-      headers: req.headers.range
-        ? {
-            Range: req.headers.range
-          }
-        : {},
-
-      maxRedirects: 5,
-      timeout: 15000,
+    // Forward important headers
+    const headersToForward = ['content-type', 'content-length', 'content-range', 'accept-ranges', 'cache-control'];
+    headersToForward.forEach((header) => {
+      const value = response.headers.get(header);
+      if (value) res.setHeader(header, value);
     });
 
-    res.status(response.status === 206 ? 206 : 200);
+    res.setHeader('Access-Control-Allow-Origin', '*');
 
-res.setHeader(
-  'Content-Type',
-  String(response.headers['content-type'] || 'video/mp4')
-);
+    if (response.body) {
+      // Fix for ReadableStream → Next.js response
+      const reader = response.body.getReader();
 
-if (response.headers['content-length']) {
-  res.setHeader(
-    'Content-Length',
-    String(response.headers['content-length'])
-  );
-}
-
-res.setHeader('Accept-Ranges', 'bytes');
-
-if (response.headers['content-range']) {
-  res.setHeader(
-    'Content-Range',
-    String(response.headers['content-range'])
-  );
-};
-
-    response.data.pipe(res);
-
-  } catch (err: any) {
-
-    console.error(err);
-
-    res.status(500).json({
-      error: 'Proxy stream failed'
-    });
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          res.end();
+          break;
+        }
+        if (value) {
+          res.write(value);
+        }
+      }
+    } else {
+      res.status(500).json({ error: 'No response body from source' });
+    }
+  } catch (error) {
+    console.error('Proxy streaming error:', error);
+    res.status(500).json({ error: 'Failed to stream video' });
   }
 }
