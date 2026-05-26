@@ -4,10 +4,6 @@ import { useRouter } from 'next/router';
 import Navbar from '../components/Navbar';
 import Footer from '../components/Footer';
 
-<<<<<<< HEAD
-interface Quality { label: string; url: string; }
-interface Subtitle { label: string; lang: string; url: string; }
-=======
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface Quality {
@@ -21,7 +17,6 @@ interface Subtitle {
   url: string;
 }
 
->>>>>>> ad5d9b3 (jinnah)
 interface FileData {
   title: string;
   size: string;
@@ -32,26 +27,6 @@ interface FileData {
   qualities?: Quality[];
   downloadUrl: string;
   subtitles?: Subtitle[];
-<<<<<<< HEAD
-}
-
-// Constants
-const SEEK_SECONDS = 10;
-const DOUBLE_TAP_DELAY = 280;
-const MAX_RETRIES = 2;
-
-function getMimeType(url: string): string {
-  const lower = url.toLowerCase();
-  if (lower.includes('.m3u8')) return 'application/x-mpegURL';
-  if (lower.includes('.mpd')) return 'application/dash+xml';
-  if (lower.includes('.webm')) return 'video/webm';
-  return 'video/mp4';
-}
-
-function getProxyUrl(url: string): string {
-  return `/api/proxy?url=${encodeURIComponent(url)}`;
-=======
->>>>>>> ad5d9b3 (jinnah)
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -74,29 +49,6 @@ function getMimeType(url: string): string {
 export default function WatchPage() {
   const router = useRouter();
   const { url } = router.query;
-<<<<<<< HEAD
-
-  const containerRef = useRef<HTMLDivElement>(null);
-  const wrapperRef = useRef<HTMLDivElement>(null);
-  const playerRef = useRef<any>(null);
-  const qualityMenuRef = useRef<HTMLDivElement>(null);
-
-  const [fileData, setFileData] = useState<FileData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [isBuffering, setIsBuffering] = useState(false);
-  const [bufferPct, setBufferPct] = useState(0);
-  const [selectedQuality, setSelectedQuality] = useState('Auto');
-  const [showQualityMenu, setShowQualityMenu] = useState(false);
-  const [manualQuality, setManualQuality] = useState(false);
-  const [retryCount, setRetryCount] = useState(0);
-
-  const tapTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const tapCountRef = useRef(0);
-  const tapSideRef = useRef<'left' | 'right' | null>(null);
-
-  // Fetch Metadata
-=======
 
   // DOM refs
   const containerRef = useRef<HTMLDivElement>(null);   // Video.js mount point
@@ -124,13 +76,11 @@ export default function WatchPage() {
   const qualityMenuRef = useRef<HTMLDivElement>(null);
 
   // ─── 1. Fetch video metadata ────────────────────────────────────────────────
->>>>>>> ad5d9b3 (jinnah)
   useEffect(() => {
     if (!url) return;
     const fetchData = async () => {
       setLoading(true);
       setError('');
-      setRetryCount(0);
       try {
         const res = await fetch('/api/resolve', {
           method: 'POST',
@@ -139,14 +89,10 @@ export default function WatchPage() {
         });
         if (!res.ok) throw new Error(`Server error: ${res.status}`);
         const data: FileData = await res.json();
-<<<<<<< HEAD
-        if (!data?.streamUrl) throw new Error('No stream URL');
-=======
         if (!data?.streamUrl) throw new Error('No stream URL returned from server.');
->>>>>>> ad5d9b3 (jinnah)
         setFileData(data);
       } catch (err: any) {
-        setError(err.message || 'Unable to load video');
+        setError(err.message || 'Unable to load video. Please check your link.');
       } finally {
         setLoading(false);
       }
@@ -154,9 +100,6 @@ export default function WatchPage() {
     fetchData();
   }, [url]);
 
-<<<<<<< HEAD
-  // Outside click for quality menu
-=======
   // ─── 2. Refresh stream URL ──────────────────────────────────────────────────
   const refreshStream = useCallback(async (): Promise<string | null> => {
     if (!url) return null;
@@ -174,7 +117,6 @@ export default function WatchPage() {
   }, [url]);
 
   // ─── 3. Close quality menu on outside click ─────────────────────────────────
->>>>>>> ad5d9b3 (jinnah)
   useEffect(() => {
     const handleOutside = (e: MouseEvent) => {
       if (qualityMenuRef.current && !qualityMenuRef.current.contains(e.target as Node)) {
@@ -185,29 +127,16 @@ export default function WatchPage() {
     return () => document.removeEventListener('mousedown', handleOutside);
   }, []);
 
-<<<<<<< HEAD
-  // Initialize Player
-=======
   // ─── 4. Initialize Video.js ─────────────────────────────────────────────────
->>>>>>> ad5d9b3 (jinnah)
   useEffect(() => {
     if (!fileData || !containerRef.current) return;
 
     let destroyed = false;
-<<<<<<< HEAD
-    let stallTimer: NodeJS.Timeout | null = null;
-=======
     let stallTimer: ReturnType<typeof setTimeout> | null = null;
->>>>>>> ad5d9b3 (jinnah)
 
     const initPlayer = async () => {
       const { default: videojs } = await import('video.js');
       if (destroyed) return;
-<<<<<<< HEAD
-
-      if (playerRef.current) playerRef.current.dispose();
-
-=======
 
       // Dispose previous player
       if (playerRef.current) {
@@ -216,26 +145,10 @@ export default function WatchPage() {
       }
 
       // Mount fresh <video> element
->>>>>>> ad5d9b3 (jinnah)
       containerRef.current!.innerHTML = '';
       const videoEl = document.createElement('video');
       videoEl.className = 'video-js vjs-big-play-centered';
       videoEl.setAttribute('controls', '');
-<<<<<<< HEAD
-      videoEl.setAttribute('preload', 'metadata');
-      videoEl.setAttribute('playsinline', '');
-      if (fileData.thumbnail) videoEl.setAttribute('poster', fileData.thumbnail);
-
-      containerRef.current!.appendChild(videoEl);
-
-      const sources = fileData.qualities?.length
-        ? fileData.qualities.map(q => ({
-            src: getProxyUrl(q.url),
-            type: getMimeType(q.url),
-            label: q.label
-          }))
-        : [{ src: getProxyUrl(fileData.streamUrl), type: getMimeType(fileData.streamUrl) }];
-=======
       videoEl.setAttribute('preload', 'auto');
       videoEl.setAttribute('playsinline', '');
       if (fileData.thumbnail) videoEl.setAttribute('poster', fileData.thumbnail);
@@ -250,7 +163,6 @@ export default function WatchPage() {
             .filter((s) => s?.url && s?.lang)
             .map((s) => ({ kind: 'subtitles' as const, src: s.url, srclang: s.lang, label: s.label }))
         : [];
->>>>>>> ad5d9b3 (jinnah)
 
       playerRef.current = videojs(videoEl, {
         autoplay: false,
@@ -260,14 +172,6 @@ export default function WatchPage() {
         playbackRates: [0.5, 0.75, 1, 1.25, 1.5, 2],
         html5: {
           vhs: {
-<<<<<<< HEAD
-            overrideNative: false,           // ← Most important for stability
-            enableLowInitialPlaylist: true,
-            smoothQualityChange: true,
-          },
-        },
-        sources,
-=======
             overrideNative: true,
             enableLowInitialPlaylist: true,   // start with low quality on slow net
             smoothQualityChange: true,
@@ -280,59 +184,19 @@ export default function WatchPage() {
         },
         sources,
         tracks,
->>>>>>> ad5d9b3 (jinnah)
       });
 
       const player = playerRef.current;
 
-<<<<<<< HEAD
-      const updateBuffer = () => {
-        const vid = player.el()?.querySelector('video') as HTMLVideoElement;
-        if (!vid?.buffered?.length || !vid.duration) return;
-=======
       // ── Buffer tracking ──
       const updateBuffer = () => {
         if (destroyed) return;
         const vid = player.el()?.querySelector('video') as HTMLVideoElement | null;
         if (!vid || !vid.buffered.length || !vid.duration) return;
->>>>>>> ad5d9b3 (jinnah)
         const pct = Math.round((vid.buffered.end(vid.buffered.length - 1) / vid.duration) * 100);
         setBufferPct(Math.min(pct, 100));
       };
 
-<<<<<<< HEAD
-      player.on('waiting', () => setIsBuffering(true));
-      player.on('playing', () => setIsBuffering(false));
-      player.on('canplay', () => setIsBuffering(false));
-      player.on('progress', updateBuffer);
-
-      // Controlled Stall Recovery
-      player.on('stalled', () => {
-        if (stallTimer) clearTimeout(stallTimer);
-        stallTimer = setTimeout(() => {
-          if (retryCount < MAX_RETRIES && !destroyed) {
-            player.play().catch(() => {});
-            setRetryCount(prev => prev + 1);
-          }
-        }, 1500);
-      });
-
-      // Error Handling
-      player.on('error', async () => {
-        if (retryCount >= MAX_RETRIES) return;
-        const freshUrl = await refreshStream();
-        if (freshUrl) {
-          player.src({ src: getProxyUrl(freshUrl), type: getMimeType(freshUrl) });
-          player.load();
-          setRetryCount(prev => prev + 1);
-        }
-      });
-    };
-
-    initPlayer().catch(err => {
-      console.error(err);
-      setError('Failed to initialize player');
-=======
       player.on('waiting',  () => { if (!destroyed) { setIsBuffering(true);  updateBuffer(); } });
       player.on('playing',  () => {
         if (!destroyed) setIsBuffering(false);
@@ -375,33 +239,11 @@ export default function WatchPage() {
     initPlayer().catch((err) => {
       console.error('Player init failed:', err);
       setError('Failed to initialize video player.');
->>>>>>> ad5d9b3 (jinnah)
     });
 
     return () => {
       destroyed = true;
       if (stallTimer) clearTimeout(stallTimer);
-<<<<<<< HEAD
-      if (playerRef.current) playerRef.current.dispose();
-    };
-  }, [fileData, retryCount]);
-
-  const refreshStream = useCallback(async () => {
-    if (!url) return null;
-    try {
-      const res = await fetch('/api/resolve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: decodeURIComponent(url as string) }),
-      });
-      const data = await res.json();
-      return data?.streamUrl ?? null;
-    } catch {
-      return null;
-    }
-  }, [url]);
-
-=======
       if (playerRef.current) {
         try { playerRef.current.dispose(); } catch {}
         playerRef.current = null;
@@ -410,57 +252,12 @@ export default function WatchPage() {
   }, [fileData, refreshStream]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ─── 5. Quality change handler ──────────────────────────────────────────────
->>>>>>> ad5d9b3 (jinnah)
   const handleQualityChange = useCallback((label: string) => {
     setSelectedQuality(label);
     setShowQualityMenu(false);
     const player = playerRef.current;
     if (!player || !fileData) return;
 
-<<<<<<< HEAD
-    const currentTime = player.currentTime();
-
-    if (label === 'Auto') {
-      setManualQuality(false);
-      player.src({ src: getProxyUrl(fileData.streamUrl), type: getMimeType(fileData.streamUrl) });
-    } else {
-      setManualQuality(true);
-      const match = fileData.qualities?.find(q => q.label === label);
-      if (match) {
-        player.src({ src: getProxyUrl(match.url), type: getMimeType(match.url) });
-      }
-    }
-    player.currentTime(currentTime);
-    player.play().catch(() => {});
-  }, [fileData]);
-
-  const handleTap = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
-    const player = playerRef.current;
-    if (!player) return;
-
-    const touch = e.changedTouches[0];
-    const rect = e.currentTarget.getBoundingClientRect();
-    const isLeft = touch.clientX - rect.left < rect.width / 2;
-    const side = isLeft ? 'left' : 'right';
-
-    tapCountRef.current += 1;
-    tapSideRef.current = side;
-
-    if (tapTimerRef.current) clearTimeout(tapTimerRef.current);
-
-    tapTimerRef.current = setTimeout(() => {
-      if (tapCountRef.current >= 2) {
-        const delta = tapSideRef.current === 'right' ? SEEK_SECONDS : -SEEK_SECONDS;
-        const newTime = Math.max(0, Math.min(player.currentTime() + delta, player.duration() || 0));
-        player.currentTime(newTime);
-      } else {
-        player.paused() ? player.play().catch(() => {}) : player.pause();
-      }
-      tapCountRef.current = 0;
-      tapSideRef.current = null;
-    }, DOUBLE_TAP_DELAY);
-  }, []);
-=======
     if (label === 'Auto') {
       setManualQuality(false);
       // Restore original source so VHS picks quality adaptively
@@ -496,7 +293,6 @@ export default function WatchPage() {
   const handleTap = useCallback((e: React.TouchEvent<HTMLDivElement>) => {
     const player = playerRef.current;
     if (!player) return;
->>>>>>> ad5d9b3 (jinnah)
 
     const touch  = e.changedTouches[0];
     const rect   = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
@@ -530,11 +326,6 @@ export default function WatchPage() {
   return (
     <>
       <Head>
-<<<<<<< HEAD
-        <title>{fileData ? `${fileData.title} — TeraStream` : 'TeraStream'}</title>
-        <meta name="robots" content="noindex" />
-        <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
-=======
         <title>{fileData ? `${fileData.title} — TeraStream` : 'Loading… — TeraStream'}</title>
         <meta name="robots" content="noindex" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -543,23 +334,13 @@ export default function WatchPage() {
           rel="stylesheet"
         />
         {/* Video.js CSS only — JS is imported dynamically, NOT via CDN script */}
->>>>>>> ad5d9b3 (jinnah)
         <link href="https://vjs.zencdn.net/8.6.1/video-js.css" rel="stylesheet" />
       </Head>
 
       <Navbar />
+
       <main className="player-page">
         <div className="player-inner">
-<<<<<<< HEAD
-          {loading && <div className="ts-loading"><div className="ts-spinner" /><p>Resolving video...</p></div>}
-          {error && <div className="ts-error"><h3>Playback Error</h3><p>{error}</p><button onClick={() => router.push('/')}>Try Another Link</button></div>}
-
-          {fileData && !loading && !error && (
-            <>
-              <div ref={wrapperRef} className="ts-player-shell" onTouchEnd={handleTap}>
-                <div ref={containerRef} className="ts-player-container" />
-
-=======
           {/* Ad slot — top */}
           <div className="ad-slot ad-slot-banner">Advertisement</div>
 
@@ -597,37 +378,21 @@ export default function WatchPage() {
                 <div className="ts-player-container" ref={containerRef} />
 
                 {/* ── Buffer overlay ── */}
->>>>>>> ad5d9b3 (jinnah)
                 {isBuffering && (
                   <div className="ts-buffer-overlay">
                     <div className="ts-buffer-box">
                       <div className="ts-buffer-ring" />
                       <div className="ts-buffer-track">
-<<<<<<< HEAD
-                        <div className="ts-buffer-fill" style={{ width: `${bufferPct}%` }} />
-=======
                         <div
                           className="ts-buffer-fill"
                           style={{ width: `${bufferPct}%` }}
                         />
->>>>>>> ad5d9b3 (jinnah)
                       </div>
                       <span className="ts-buffer-pct">{bufferPct}%</span>
                     </div>
                   </div>
                 )}
 
-<<<<<<< HEAD
-                <div className="ts-quality-wrap" ref={qualityMenuRef}>
-                  <button className="ts-quality-btn" onClick={() => setShowQualityMenu(!showQualityMenu)}>
-                    <span>{selectedQuality}</span>
-                  </button>
-                  {showQualityMenu && (
-                    <ul className="ts-quality-menu">
-                      {['Auto', '360p', '480p', '720p'].map(label => (
-                        <li key={label} className={`ts-quality-item ${selectedQuality === label ? 'active' : ''}`} onClick={() => handleQualityChange(label)}>
-                          {label}
-=======
                 {/* ── Quality selector (top-right corner) ── */}
                 <div className="ts-quality-wrap" ref={qualityMenuRef}>
                   <button
@@ -663,7 +428,6 @@ export default function WatchPage() {
                               <path d="M2 5l2.5 2.5L8.5 2.5" stroke="#6C47FF" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
                             </svg>
                           )}
->>>>>>> ad5d9b3 (jinnah)
                         </li>
                       ))}
                     </ul>
@@ -671,14 +435,6 @@ export default function WatchPage() {
                 </div>
               </div>
 
-<<<<<<< HEAD
-              <div className="ts-info">
-                <h1 className="ts-title">{fileData.title}</h1>
-                <div className="ts-meta">
-                  {fileData.size && <span className="ts-meta-chip">{fileData.size}</span>}
-                  {fileData.resolution && <span className="ts-meta-chip">{fileData.resolution}</span>}
-                  {fileData.duration && <span className="ts-meta-chip">{fileData.duration}</span>}
-=======
               {/* ── File metadata ── */}
               <div className="ts-info">
                 <h1 className="ts-title">{fileData.title}</h1>
@@ -721,25 +477,26 @@ export default function WatchPage() {
                 <div className="ts-download-info">
                   <strong>Download File</strong>
                   <span>{fileData.title}</span>
->>>>>>> ad5d9b3 (jinnah)
                 </div>
-              </div>
-
-              <div className="ts-download-bar">
-                <a href={`/api/download?id=${encodeURIComponent(fileData.downloadUrl)}`} className="btn-primary" download>Download</a>
+                <a
+                  href={`/api/download?id=${encodeURIComponent(fileData.downloadUrl)}`}
+                  className="btn-primary"
+                  download
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path d="M8 2V11M8 11L5 8M8 11L11 8" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                    <path d="M2 14H14" stroke="white" strokeWidth="2" strokeLinecap="round"/>
+                  </svg>
+                  Download
+                </a>
               </div>
             </>
           )}
         </div>
       </main>
+
       <Footer />
 
-<<<<<<< HEAD
-      {/* Video.js Global Styles */}
-      <style jsx global>{`
-        .video-js .vjs-big-play-button { background: rgba(108,71,255,0.9) !important; }
-        .video-js .vjs-play-progress { background: #6C47FF !important; }
-=======
       {/* ─────────────────────────────────────────────────────────────────────── */}
       <style jsx global>{`
         /* ── Video.js overrides ─────────────────────────────── */
@@ -1057,10 +814,7 @@ export default function WatchPage() {
           .ts-download-bar { flex-direction: column; align-items: flex-start; }
           .ts-download-info span { max-width: 100%; }
         }
->>>>>>> ad5d9b3 (jinnah)
       `}</style>
-
-      {/* Your existing <style jsx> remains the same */}
     </>
   );
 }
