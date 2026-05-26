@@ -1,12 +1,10 @@
 import crypto from 'crypto';
 import { redis } from '../server';
 
-// ─── KEY FIX: Stream URLs expire in ~1-2 hrs on TeraBox CDN.
-// Cache only metadata; never cache the raw stream/download URLs.
-// We store a short-lived "url-to-resolved-data" mapping and
-// always re-fetch if the stream portion is stale.
-const METADATA_CACHE_TTL = parseInt(process.env.CACHE_TTL_SECONDS || '3600');   // 1 hour max
-const STREAM_URL_TTL     = parseInt(process.env.STREAM_URL_TTL_SECONDS || '1800'); // 30 min — conservative
+// Stream URLs from xAPIverse expire in ~1-2 hrs.
+// HLS Worker URLs (*.workers.dev) are additionally unstable — we skip them.
+const METADATA_CACHE_TTL  = 3600;  // 1 hour
+const STREAM_URL_TTL      = 1800;  // 30 min stream freshness window
 
 const API_ENDPOINT =
   process.env.XAPIVERSE_API_ENDPOINT || 'https://xapiverse.com/api/terabox';
@@ -36,30 +34,92 @@ export interface ResolvedFile {
   downloadUrl: string;
   subtitles: SubtitleTrack[];
   cachedAt?: number;
-  // NEW: unix timestamp when stream URLs were fetched
   streamFetchedAt?: number;
-  views?: number;
-  sourceUrl?: string;
-  folderName?: string;
 }
 
-// ─── Cache helpers ────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function getCacheKey(url: string): string {
   const hash = crypto
     .createHash('sha256')
     .update(url.trim().toLowerCase())
     .digest('hex');
-  return `terastream:resolve:v2:${hash}`; // v2 to bust old 12-hr cached entries
+  return `terastream:resolve:v3:${hash}`; // v3 busts all old cached HLS entries
+}
+
+function isStreamFresh(fetchedAt: number | undefined): boolean {
+  if (!fetchedAt) return false;
+  return Date.now() - fetchedAt < STREAM_URL_TTL * 1000;
 }
 
 /**
- * Is the cached stream URL still usable?
- * Returns false if it was fetched more than STREAM_URL_TTL seconds ago.
+ * KEY FIX: Reject unstable HLS Worker URLs from xAPIverse.
+ *
+ * xAPIverse fast_stream_url values look like:
+ *   https://round-mountain-2461.lelidulu.workers.dev/fast_stream?token=...m3u8
+ *   https://withered-term-6150.ledepamu.workers.dev/fast_stream?token=...m3u8
+ *
+ * These are Cloudflare Worker proxies that serve HLS playlists, but the
+ * underlying segment fetches fail with ERR_QUIC_PROTOCOL_ERROR /
+ * NETWORK_IDLE_TIMEOUT. We detect and discard them, falling back to the
+ * direct stream_url / video_url / download_url which are stable MP4s.
  */
-function isStreamFresh(cachedAt: number | undefined): boolean {
-  if (!cachedAt) return false;
-  return Date.now() - cachedAt < STREAM_URL_TTL * 1000;
+function isUnstableHlsWorker(url: string): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    // *.workers.dev HLS streams — unstable
+    if (parsed.hostname.endsWith('.workers.dev')) return true;
+    // Any URL whose path ends with .m3u8 from a workers subdomain
+    if (parsed.pathname.includes('.m3u8') && parsed.hostname.includes('workers')) return true;
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+/**
+ * Filter quality list: remove Worker HLS entries, keep direct MP4/stable URLs.
+ */
+function filterQualities(raw: StreamQuality[]): StreamQuality[] {
+  return raw.filter((q) => q.url && !isUnstableHlsWorker(q.url));
+}
+
+/**
+ * Pick the best starting stream URL.
+ * Priority: lowest stable quality first (for fast start), then fallbacks.
+ */
+function pickStreamUrl(
+  qualities: StreamQuality[],
+  fileData: any
+): string {
+  const PRIORITY = ['360p', '480p', '720p', '1080p', '4K', 'HD', 'SD'];
+
+  // Try stable quality URLs in priority order
+  for (const label of PRIORITY) {
+    const match = qualities.find((q) => q.label === label);
+    if (match?.url) return match.url;
+  }
+
+  // Any stable quality URL
+  if (qualities[0]?.url) return qualities[0].url;
+
+  // Direct non-worker stream fields from API
+  const candidates = [
+    fileData.stream_url,
+    fileData.video_url,
+    fileData.hls_url,
+    fileData.direct_url,
+    fileData.download_url,
+    fileData.normal_dlink,
+  ].filter(Boolean);
+
+  // Prefer non-worker URLs
+  const stableCandidate = candidates.find((u) => !isUnstableHlsWorker(u));
+  if (stableCandidate) return stableCandidate;
+
+  // Last resort: use whatever is available
+  return candidates[0] || '';
 }
 
 // ─── URL validation ───────────────────────────────────────────────────────────
@@ -78,30 +138,24 @@ export function validateTeraBoxUrl(url: string): boolean {
 export async function resolveTeraBoxUrl(url: string): Promise<ResolvedFile> {
   const cacheKey = getCacheKey(url);
 
-  // 1. Check Redis — but ONLY use cached stream URLs if still fresh
+  // 1. Check Redis cache
   try {
     const cached = await redis.get(cacheKey);
     if (cached) {
       const parsed = JSON.parse(cached) as ResolvedFile;
-
       if (isStreamFresh(parsed.streamFetchedAt)) {
-        // Stream URLs still valid — return as-is
+        console.info('[TeraBox] Cache hit — stream still fresh');
         return parsed;
       }
-
-      // Stream URLs stale — fall through to re-fetch from API.
-      // We'll keep the metadata (title, size etc.) but replace stream URLs.
-      console.info('[TeraBox] Cache hit but stream URLs stale — refreshing…');
+      console.info('[TeraBox] Cache hit but stream stale — refreshing from API');
     }
   } catch (err) {
     console.error('[TeraBox] Redis get error:', err);
   }
 
-  // 2. Call external API
+  // 2. Call xAPIverse API
   if (!API_KEY) {
-    throw new Error(
-      'API key not configured. Please set XAPIVERSE_API_KEY in environment variables.'
-    );
+    throw new Error('API key not configured. Set XAPIVERSE_API_KEY.');
   }
 
   const response = await fetch(API_ENDPOINT, {
@@ -117,38 +171,33 @@ export async function resolveTeraBoxUrl(url: string): Promise<ResolvedFile> {
 
   if (!response.ok) {
     const errBody = await response.text().catch(() => '');
-    if (response.status === 429)
-      throw new Error('API rate limit reached. Please try again later.');
-    if (response.status === 404)
-      throw new Error('File not found or link has expired.');
+    if (response.status === 429) throw new Error('API rate limit reached. Please try again later.');
+    if (response.status === 404) throw new Error('File not found or link has expired.');
     throw new Error(`API error ${response.status}: ${errBody || 'Unknown error'}`);
   }
 
   const apiResponse: any = await response.json();
-  console.log('[TeraBox] API response keys:', Object.keys(apiResponse));
+
+  // Log raw response for debugging (remove in production)
+  console.log('[TeraBox] Raw API keys:', JSON.stringify(Object.keys(apiResponse)));
 
   const fileData = apiResponse.list?.[0] || apiResponse;
 
-  // 3. Normalize qualities
-  const qualities: StreamQuality[] = Object.entries(
+  // 3. Build quality list — FILTER OUT unstable HLS worker URLs
+  const rawQualities: StreamQuality[] = Object.entries(
     fileData.fast_stream_url || {}
-  ).map(([label, u]) => ({
-    label,
-    url: String(u),
-  }));
+  ).map(([label, u]) => ({ label, url: String(u) }));
 
-  // Quality priority order for streamUrl:
-  // Pick the LOWEST quality available as default so it starts fast.
-  // Users can switch up via the quality selector.
-  const QUALITY_PRIORITY = ['360p', '480p', '720p', '1080p'];
+  const stableQualities = filterQualities(rawQualities);
 
-  const bestStartUrl =
-    QUALITY_PRIORITY.map((q) => qualities.find((x) => x.label === q)?.url)
-      .find(Boolean) ||
-    fileData.stream_url ||
-    fileData.hls_url ||
-    fileData.video_url ||
-    '';
+  // Log what was filtered for visibility
+  const filteredOut = rawQualities.filter((q) => isUnstableHlsWorker(q.url));
+  if (filteredOut.length > 0) {
+    console.warn(
+      '[TeraBox] Filtered out unstable HLS worker URLs:',
+      filteredOut.map((q) => q.label)
+    );
+  }
 
   const now = Date.now();
 
@@ -164,7 +213,7 @@ export async function resolveTeraBoxUrl(url: string): Promise<ResolvedFile> {
     resolution:
       fileData.resolution ||
       fileData.video_quality ||
-      qualities[qualities.length - 1]?.label ||
+      stableQualities[stableQualities.length - 1]?.label ||
       '',
 
     duration:
@@ -174,9 +223,11 @@ export async function resolveTeraBoxUrl(url: string): Promise<ResolvedFile> {
 
     thumbnail: fileData.thumbnail || fileData.thumb || '',
 
-    streamUrl: bestStartUrl,
+    // Use stable stream URL — lowest quality first for fast start
+    streamUrl: pickStreamUrl(stableQualities, fileData),
 
-    qualities,
+    // Only expose stable quality options to the frontend
+    qualities: stableQualities,
 
     downloadUrl:
       fileData.download_url ||
@@ -196,14 +247,18 @@ export async function resolveTeraBoxUrl(url: string): Promise<ResolvedFile> {
       : [],
 
     cachedAt: now,
-    streamFetchedAt: now, // track when stream URLs were fetched
+    streamFetchedAt: now,
   };
 
   if (!result.streamUrl && !result.downloadUrl) {
-    throw new Error('No streaming or download URL found for this file.');
+    throw new Error('No stable streaming URL found for this file. The link may be unsupported.');
   }
 
-  // 4. Save to Redis with shorter TTL
+  // Log what we're using
+  console.info('[TeraBox] Using streamUrl:', result.streamUrl.substring(0, 80) + '...');
+  console.info('[TeraBox] Stable qualities:', stableQualities.map((q) => q.label));
+
+  // 4. Cache result
   try {
     await redis.setex(cacheKey, METADATA_CACHE_TTL, JSON.stringify(result));
   } catch (err) {
@@ -213,7 +268,7 @@ export async function resolveTeraBoxUrl(url: string): Promise<ResolvedFile> {
   return result;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Formatters ───────────────────────────────────────────────────────────────
 
 function formatBytes(bytes: number): string {
   if (!bytes || bytes === 0) return '';
