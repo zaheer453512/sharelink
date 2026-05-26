@@ -32,16 +32,68 @@ interface FileData {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const SEEK_SECONDS = 10;
-const DOUBLE_TAP_DELAY = 280; // ms window for double-tap detection
+const DOUBLE_TAP_DELAY = 280;
 const QUALITY_LABELS = ['Auto', '360p', '480p', '720p'];
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// Max retries before showing persistent error
+const MAX_STALL_RETRIES = 3;
+// How long (ms) to wait before stall recovery attempt
+const STALL_RECOVERY_DELAY = 3000;
+// Timeout (ms) for preflight HEAD request to detect stream type
+const PROBE_TIMEOUT_MS = 6000;
 
-function getMimeType(url: string): string {
-  if (url.includes('.m3u8')) return 'application/x-mpegURL';
-  if (url.includes('.mpd')) return 'application/dash+xml';
-  if (url.includes('.webm')) return 'video/webm';
-  return 'video/mp4';
+// ─── Stream type detection ────────────────────────────────────────────────────
+
+type StreamType = 'hls' | 'dash' | 'mp4' | 'webm' | 'unknown';
+
+/**
+ * Detect stream type by probing the URL with a HEAD request.
+ * Falls back to URL-sniffing if the probe fails or times out.
+ */
+async function detectStreamType(url: string): Promise<StreamType> {
+  // Fast path: URL contains a clear hint
+  if (url.includes('.m3u8') || url.includes('m3u8')) return 'hls';
+  if (url.includes('.mpd')  || url.includes('mpd'))  return 'dash';
+  if (url.includes('.webm'))                          return 'webm';
+
+  // Probe the server for Content-Type
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+
+    const res = await fetch(url, {
+      method: 'HEAD',
+      signal: controller.signal,
+      // Avoid preflight issues on some CDNs
+      headers: { Range: 'bytes=0-0' },
+    });
+    clearTimeout(timer);
+
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    if (ct.includes('mpegurl') || ct.includes('x-mpegurl')) return 'hls';
+    if (ct.includes('dash+xml'))                            return 'dash';
+    if (ct.includes('webm'))                                return 'webm';
+    if (ct.includes('mp4') || ct.includes('video'))        return 'mp4';
+
+    // TeraBox-specific: if content-disposition has .mp4 → mp4
+    const cd = (res.headers.get('content-disposition') || '').toLowerCase();
+    if (cd.includes('.mp4')) return 'mp4';
+  } catch {
+    // Probe failed — fall through to URL sniff
+  }
+
+  // URL sniff fallback
+  if (url.includes('.mp4')) return 'mp4';
+  return 'mp4'; // TeraBox default: most direct links are MP4
+}
+
+function mimeForType(type: StreamType): string {
+  switch (type) {
+    case 'hls':  return 'application/x-mpegURL';
+    case 'dash': return 'application/dash+xml';
+    case 'webm': return 'video/webm';
+    default:     return 'video/mp4';
+  }
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -51,29 +103,35 @@ export default function WatchPage() {
   const { url } = router.query;
 
   // DOM refs
-  const containerRef = useRef<HTMLDivElement>(null);   // Video.js mount point
-  const wrapperRef   = useRef<HTMLDivElement>(null);   // Outer touch wrapper
+  const containerRef = useRef<HTMLDivElement>(null);
+  const wrapperRef   = useRef<HTMLDivElement>(null);
   const playerRef    = useRef<any>(null);
 
   // Page state
-  const [fileData, setFileData] = useState<FileData | null>(null);
-  const [loading,  setLoading]  = useState(true);
-  const [error,    setError]    = useState('');
+  const [fileData,  setFileData]  = useState<FileData | null>(null);
+  const [loading,   setLoading]   = useState(true);
+  const [error,     setError]     = useState('');
 
   // Buffer overlay state
-  const [isBuffering,  setIsBuffering]  = useState(false);
-  const [bufferPct,    setBufferPct]    = useState(0);
+  const [isBuffering, setIsBuffering] = useState(false);
+  const [bufferPct,   setBufferPct]   = useState(0);
 
   // Quality selector state
   const [selectedQuality, setSelectedQuality] = useState('Auto');
-  const [showQualityMenu,  setShowQualityMenu] = useState(false);
-  const [manualQuality,   setManualQuality]   = useState(false); // user has overridden auto
+  const [showQualityMenu, setShowQualityMenu] = useState(false);
+  const [manualQuality,   setManualQuality]   = useState(false);
 
-  // Internal double-tap refs (avoids re-renders)
+  // Stream type state (used by quality handler)
+  const streamTypeRef = useRef<StreamType>('mp4');
+
+  // Internal double-tap refs
   const tapTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
   const tapCountRef    = useRef(0);
   const tapSideRef     = useRef<'left' | 'right' | null>(null);
   const qualityMenuRef = useRef<HTMLDivElement>(null);
+
+  // Stall retry counter
+  const stallRetryRef = useRef(0);
 
   // ─── 1. Fetch video metadata ────────────────────────────────────────────────
   useEffect(() => {
@@ -131,10 +189,20 @@ export default function WatchPage() {
   useEffect(() => {
     if (!fileData || !containerRef.current) return;
 
-    let destroyed = false;
+    let destroyed   = false;
     let stallTimer: ReturnType<typeof setTimeout> | null = null;
+    stallRetryRef.current = 0;
 
     const initPlayer = async () => {
+      // ── Detect stream type before loading Video.js ──
+      let detectedType: StreamType = 'mp4';
+      try {
+        detectedType = await detectStreamType(fileData.streamUrl);
+      } catch {
+        detectedType = 'mp4';
+      }
+      streamTypeRef.current = detectedType;
+
       const { default: videojs } = await import('video.js');
       if (destroyed) return;
 
@@ -154,33 +222,55 @@ export default function WatchPage() {
       if (fileData.thumbnail) videoEl.setAttribute('poster', fileData.thumbnail);
       containerRef.current!.appendChild(videoEl);
 
+      // ── Build sources ──
+      const isAdaptive = detectedType === 'hls' || detectedType === 'dash';
+
       const sources = fileData.qualities?.length
-        ? fileData.qualities.map((q) => ({ src: q.url, type: getMimeType(q.url), label: q.label }))
-        : [{ src: fileData.streamUrl, type: getMimeType(fileData.streamUrl) }];
+        ? fileData.qualities.map((q) => ({
+            src:   q.url,
+            type:  mimeForType(detectedType),
+            label: q.label,
+          }))
+        : [{ src: fileData.streamUrl, type: mimeForType(detectedType) }];
 
       const tracks = Array.isArray(fileData.subtitles)
         ? fileData.subtitles
             .filter((s) => s?.url && s?.lang)
-            .map((s) => ({ kind: 'subtitles' as const, src: s.url, srclang: s.lang, label: s.label }))
+            .map((s) => ({
+              kind: 'subtitles' as const,
+              src: s.url,
+              srclang: s.lang,
+              label: s.label,
+            }))
         : [];
 
+      // ── VHS options differ for adaptive vs progressive ──
+      const vhsOptions = isAdaptive
+        ? {
+            // HLS/DASH: adaptive bitrate, start low
+            overrideNative:                  true,
+            enableLowInitialPlaylist:        true,
+            smoothQualityChange:             true,
+            bandwidth:                       1500000, // 1.5 Mbps initial estimate
+            limitRenditionByPlayerDimensions: false,   // let ABR decide freely
+            useNetworkInformationApi:        true,
+          }
+        : {
+            // Progressive MP4: disable VHS ABR overhead entirely
+            overrideNative: false,
+          };
+
       playerRef.current = videojs(videoEl, {
-        autoplay: false,
-        controls: true,
-        responsive: true,
-        fluid: true,
+        autoplay:      false,
+        controls:      true,
+        responsive:    true,
+        fluid:         true,
         playbackRates: [0.5, 0.75, 1, 1.25, 1.5, 2],
         html5: {
-          vhs: {
-            overrideNative: true,
-            enableLowInitialPlaylist: true,   // start with low quality on slow net
-            smoothQualityChange: true,
-            bandwidth: 500000,                 // initial bandwidth estimate
-            limitRenditionByPlayerDimensions: true,
-          },
-          nativeVideoTracks: false,
-          nativeAudioTracks: false,
-          nativeTextTracks: false,
+          vhs: vhsOptions,
+          nativeVideoTracks: !isAdaptive,  // native tracks fine for MP4
+          nativeAudioTracks: !isAdaptive,
+          nativeTextTracks:  false,
         },
         sources,
         tracks,
@@ -193,51 +283,96 @@ export default function WatchPage() {
         if (destroyed) return;
         const vid = player.el()?.querySelector('video') as HTMLVideoElement | null;
         if (!vid || !vid.buffered.length || !vid.duration) return;
-        const pct = Math.round((vid.buffered.end(vid.buffered.length - 1) / vid.duration) * 100);
+        const pct = Math.round(
+          (vid.buffered.end(vid.buffered.length - 1) / vid.duration) * 100
+        );
         setBufferPct(Math.min(pct, 100));
       };
 
-      player.on('waiting',  () => { if (!destroyed) { setIsBuffering(true);  updateBuffer(); } });
+      player.on('waiting',  () => { if (!destroyed) { setIsBuffering(true); updateBuffer(); } });
       player.on('playing',  () => {
-        if (!destroyed) setIsBuffering(false);
+        if (!destroyed) { setIsBuffering(false); stallRetryRef.current = 0; }
         if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; }
       });
       player.on('canplay',  () => { if (!destroyed) setIsBuffering(false); });
       player.on('progress', () => { updateBuffer(); });
 
-      // ── Stall recovery ──
-      player.on('stalled', () => {
-        console.warn('Stalled — retry in 2 s');
-        stallTimer = setTimeout(() => {
-          if (!destroyed) player.play().catch(() => {});
-        }, 2000);
-      });
+      // ── Stall recovery with exponential back-off + stream refresh ──
+      const attemptStallRecovery = async () => {
+        if (destroyed) return;
 
-      // ── Error + stream refresh ──
-      player.on('error', async () => {
-        const vjsError = player.error();
-        console.warn('VJS error:', vjsError?.code, vjsError?.message);
-        if (vjsError?.code === 2 || vjsError?.code === 4) {
+        const attempt = ++stallRetryRef.current;
+        console.warn(`[TeraStream] Stall recovery attempt #${attempt}`);
+
+        if (attempt > MAX_STALL_RETRIES) {
+          // All retries exhausted — try a full stream URL refresh
+          console.warn('[TeraStream] Max retries hit, refreshing stream URL…');
           const freshUrl = await refreshStream();
           if (freshUrl && !destroyed) {
+            const savedTime = player.currentTime();
             player.error(null);
-            player.src({ src: freshUrl, type: getMimeType(freshUrl) });
+            player.src({ src: freshUrl, type: mimeForType(streamTypeRef.current) });
             player.load();
-            try { await player.play(); } catch {}
+            player.one('canplay', () => {
+              try { player.currentTime(savedTime); player.play(); } catch {}
+            });
+          }
+          return;
+        }
+
+        // Attempt a seek-then-play to unstick the buffer
+        const delay = STALL_RECOVERY_DELAY * attempt;
+        stallTimer = setTimeout(() => {
+          if (destroyed) return;
+          const vid = player.el()?.querySelector('video') as HTMLVideoElement | null;
+          if (vid) {
+            // Micro-seek trick: forces browser decoder to re-request data
+            const t = player.currentTime();
+            player.currentTime(Math.max(0, t - 0.1));
+          }
+          player.play().catch(() => {});
+        }, delay);
+      };
+
+      player.on('stalled', () => attemptStallRecovery());
+
+      // ── Comprehensive error + stream refresh ──
+      player.on('error', async () => {
+        const vjsError = player.error();
+        const code = vjsError?.code ?? -1;
+        console.warn('[TeraStream] VJS error code:', code, vjsError?.message);
+
+        // Codes 1-4 are MediaError codes; all warrant a refresh attempt
+        if (code >= 1 && code <= 4) {
+          const savedTime = player.currentTime();
+          const freshUrl  = await refreshStream();
+
+          if (freshUrl && !destroyed) {
+            // Re-detect stream type in case URL changed
+            const newType = await detectStreamType(freshUrl).catch(() => streamTypeRef.current);
+            streamTypeRef.current = newType;
+
+            player.error(null);
+            player.src({ src: freshUrl, type: mimeForType(newType) });
+            player.load();
+            player.one('canplay', () => {
+              try { player.currentTime(savedTime); player.play(); } catch {}
+            });
+          } else if (!destroyed) {
+            setError('Stream unavailable. The link may have expired — try refreshing the page.');
           }
         }
       });
 
-      // ── Auto quality: listen to VHS bandwidth and downgrade if needed ──
+      // ── Adaptive bandwidth label update ──
       player.on('bandwidthupdate', () => {
-        if (manualQuality) return; // user has overridden — respect that
-        // VHS will handle adaptive streaming internally; just update label
+        if (manualQuality) return;
         setSelectedQuality('Auto');
       });
     };
 
     initPlayer().catch((err) => {
-      console.error('Player init failed:', err);
+      console.error('[TeraStream] Player init failed:', err);
       setError('Failed to initialize video player.');
     });
 
@@ -260,32 +395,36 @@ export default function WatchPage() {
 
     if (label === 'Auto') {
       setManualQuality(false);
-      // Restore original source so VHS picks quality adaptively
-      player.src({ src: fileData.streamUrl, type: getMimeType(fileData.streamUrl) });
+      const type = streamTypeRef.current;
+      player.src({ src: fileData.streamUrl, type: mimeForType(type) });
       player.play().catch(() => {});
       return;
     }
 
     setManualQuality(true);
 
-    // Try to find a matching quality URL from fileData.qualities
+    // Try explicit quality URL first
     const match = fileData.qualities?.find((q) => q.label === label);
     if (match) {
       const currentTime = player.currentTime();
-      player.src({ src: match.url, type: getMimeType(match.url) });
-      player.currentTime(currentTime);
-      player.play().catch(() => {});
+      const type = streamTypeRef.current;
+      player.src({ src: match.url, type: mimeForType(type) });
+      player.one('canplay', () => {
+        try { player.currentTime(currentTime); player.play(); } catch {}
+      });
       return;
     }
 
-    // Fallback: use VHS rendition selection by height if available
-    const vhs = player.tech(true)?.vhs;
-    if (vhs && vhs.representations) {
-      const heightMap: Record<string, number> = { '360p': 360, '480p': 480, '720p': 720 };
-      const targetHeight = heightMap[label];
-      vhs.representations().forEach((r: any) => {
-        r.enabled(r.height === targetHeight);
-      });
+    // Fallback: VHS rendition selection for HLS
+    if (streamTypeRef.current === 'hls') {
+      const vhs = player.tech(true)?.vhs;
+      if (vhs?.representations) {
+        const heightMap: Record<string, number> = { '360p': 360, '480p': 480, '720p': 720 };
+        const targetH = heightMap[label];
+        vhs.representations().forEach((r: any) => {
+          r.enabled(r.height === targetH);
+        });
+      }
     }
   }, [fileData]);
 
@@ -311,11 +450,13 @@ export default function WatchPage() {
       tapSideRef.current  = null;
 
       if (count >= 2) {
-        const delta  = s === 'right' ? SEEK_SECONDS : -SEEK_SECONDS;
-        const newTime = Math.max(0, Math.min(player.currentTime() + delta, player.duration() || 0));
+        const delta   = s === 'right' ? SEEK_SECONDS : -SEEK_SECONDS;
+        const newTime = Math.max(0, Math.min(
+          player.currentTime() + delta,
+          player.duration() || 0
+        ));
         player.currentTime(newTime);
       } else {
-        // Single tap — toggle play/pause
         if (player.paused()) player.play().catch(() => {});
         else player.pause();
       }
@@ -333,7 +474,6 @@ export default function WatchPage() {
           href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap"
           rel="stylesheet"
         />
-        {/* Video.js CSS only — JS is imported dynamically, NOT via CDN script */}
         <link href="https://vjs.zencdn.net/8.6.1/video-js.css" rel="stylesheet" />
       </Head>
 
@@ -357,11 +497,18 @@ export default function WatchPage() {
             <div className="ts-error">
               <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
                 <circle cx="24" cy="24" r="22" stroke="#FF5B5B" strokeWidth="2" />
-                <path d="M24 14V26M24 32V34" stroke="#FF5B5B" strokeWidth="2.5" strokeLinecap="round" />
+                <path
+                  d="M24 14V26M24 32V34"
+                  stroke="#FF5B5B"
+                  strokeWidth="2.5"
+                  strokeLinecap="round"
+                />
               </svg>
               <h3>Unable to Load Video</h3>
               <p>{error}</p>
-              <button className="btn-primary" onClick={() => router.push('/')}>← Try Another Link</button>
+              <button className="btn-primary" onClick={() => router.push('/')}>
+                ← Try Another Link
+              </button>
             </div>
           )}
 
@@ -369,11 +516,7 @@ export default function WatchPage() {
           {fileData && !loading && !error && (
             <>
               {/* Touch wrapper — handles double-tap seek */}
-              <div
-                ref={wrapperRef}
-                className="ts-player-shell"
-                onTouchEnd={handleTap}
-              >
+              <div ref={wrapperRef} className="ts-player-shell" onTouchEnd={handleTap}>
                 {/* Video.js container */}
                 <div className="ts-player-container" ref={containerRef} />
 
@@ -393,7 +536,7 @@ export default function WatchPage() {
                   </div>
                 )}
 
-                {/* ── Quality selector (top-right corner) ── */}
+                {/* ── Quality selector ── */}
                 <div className="ts-quality-wrap" ref={qualityMenuRef}>
                   <button
                     className="ts-quality-btn"
@@ -401,9 +544,9 @@ export default function WatchPage() {
                     title="Quality"
                   >
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                      <rect x="1" y="4" width="14" height="2.5" rx="1" fill="currentColor" />
-                      <rect x="1" y="8" width="10" height="2.5" rx="1" fill="currentColor" />
-                      <rect x="1" y="12" width="6" height="2.5" rx="1" fill="currentColor" />
+                      <rect x="1" y="4"  width="14" height="2.5" rx="1" fill="currentColor" />
+                      <rect x="1" y="8"  width="10" height="2.5" rx="1" fill="currentColor" />
+                      <rect x="1" y="12" width="6"  height="2.5" rx="1" fill="currentColor" />
                     </svg>
                     <span>{selectedQuality}</span>
                   </button>
@@ -417,15 +560,33 @@ export default function WatchPage() {
                           onClick={() => handleQualityChange(label)}
                         >
                           {label === 'Auto' && (
-                            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" style={{ marginRight: 6 }}>
-                              <circle cx="6" cy="6" r="5" stroke="currentColor" strokeWidth="1.3"/>
-                              <path d="M4 6l1.5 1.5L8.5 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+                            <svg
+                              width="12" height="12" viewBox="0 0 12 12" fill="none"
+                              style={{ marginRight: 6 }}
+                            >
+                              <circle cx="6" cy="6" r="5" stroke="currentColor" strokeWidth="1.3" />
+                              <path
+                                d="M4 6l1.5 1.5L8.5 4"
+                                stroke="currentColor"
+                                strokeWidth="1.3"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
                             </svg>
                           )}
                           {label}
                           {selectedQuality === label && (
-                            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" style={{ marginLeft: 'auto' }}>
-                              <path d="M2 5l2.5 2.5L8.5 2.5" stroke="#6C47FF" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                            <svg
+                              width="10" height="10" viewBox="0 0 10 10" fill="none"
+                              style={{ marginLeft: 'auto' }}
+                            >
+                              <path
+                                d="M2 5l2.5 2.5L8.5 2.5"
+                                stroke="#6C47FF"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
                             </svg>
                           )}
                         </li>
@@ -442,8 +603,8 @@ export default function WatchPage() {
                   {fileData.size && (
                     <span className="ts-meta-chip">
                       <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                        <rect x="1.5" y="1.5" width="10" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2"/>
-                        <path d="M4 6.5H9M6.5 4V9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+                        <rect x="1.5" y="1.5" width="10" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+                        <path d="M4 6.5H9M6.5 4V9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
                       </svg>
                       {fileData.size}
                     </span>
@@ -451,8 +612,8 @@ export default function WatchPage() {
                   {fileData.resolution && (
                     <span className="ts-meta-chip">
                       <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                        <rect x="1" y="2.5" width="11" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2"/>
-                        <path d="M4.5 8L6.5 6L8.5 8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+                        <rect x="1" y="2.5" width="11" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
+                        <path d="M4.5 8L6.5 6L8.5 8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
                       </svg>
                       {fileData.resolution}
                     </span>
@@ -460,8 +621,8 @@ export default function WatchPage() {
                   {fileData.duration && (
                     <span className="ts-meta-chip">
                       <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                        <circle cx="6.5" cy="6.5" r="5" stroke="currentColor" strokeWidth="1.2"/>
-                        <path d="M6.5 3.5V6.5L8.5 8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round"/>
+                        <circle cx="6.5" cy="6.5" r="5" stroke="currentColor" strokeWidth="1.2" />
+                        <path d="M6.5 3.5V6.5L8.5 8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
                       </svg>
                       {fileData.duration}
                     </span>
@@ -484,8 +645,14 @@ export default function WatchPage() {
                   download
                 >
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                    <path d="M8 2V11M8 11L5 8M8 11L11 8" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
-                    <path d="M2 14H14" stroke="white" strokeWidth="2" strokeLinecap="round"/>
+                    <path
+                      d="M8 2V11M8 11L5 8M8 11L11 8"
+                      stroke="white"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                    <path d="M2 14H14" stroke="white" strokeWidth="2" strokeLinecap="round" />
                   </svg>
                   Download
                 </a>
@@ -499,7 +666,6 @@ export default function WatchPage() {
 
       {/* ─────────────────────────────────────────────────────────────────────── */}
       <style jsx global>{`
-        /* ── Video.js overrides ─────────────────────────────── */
         .video-js { width: 100% !important; height: 100% !important; }
 
         .video-js .vjs-big-play-button {
@@ -529,12 +695,10 @@ export default function WatchPage() {
         .video-js .vjs-slider-bar     { background: rgba(255,255,255,0.15) !important; }
         .video-js .vjs-volume-level   { background: #6C47FF !important; }
 
-        /* Hide default VJS quality picker — we use our own */
         .video-js .vjs-quality-selector { display: none !important; }
       `}</style>
 
       <style jsx>{`
-        /* ── Player shell ───────────────────────────────────── */
         .ts-player-shell {
           position: relative;
           width: 100%;
@@ -550,7 +714,6 @@ export default function WatchPage() {
           aspect-ratio: 16 / 9;
         }
 
-        /* ── Buffer overlay ─────────────────────────────────── */
         .ts-buffer-overlay {
           position: absolute;
           inset: 0;
@@ -577,7 +740,6 @@ export default function WatchPage() {
           box-shadow: 0 8px 32px rgba(0,0,0,0.4);
         }
 
-        /* Spinning ring */
         .ts-buffer-ring {
           width: 36px; height: 36px;
           border: 3px solid rgba(255,255,255,0.1);
@@ -589,7 +751,6 @@ export default function WatchPage() {
           to { transform: rotate(360deg); }
         }
 
-        /* Progress bar */
         .ts-buffer-track {
           width: 100%;
           height: 4px;
@@ -605,7 +766,6 @@ export default function WatchPage() {
           position: relative;
           overflow: hidden;
         }
-        /* Shimmer effect on buffer bar */
         .ts-buffer-fill::after {
           content: '';
           position: absolute;
@@ -618,7 +778,6 @@ export default function WatchPage() {
           to   { transform: translateX(200%); }
         }
 
-        /* Percentage text */
         .ts-buffer-pct {
           font-family: 'Poppins', sans-serif;
           font-size: 13px;
@@ -629,7 +788,6 @@ export default function WatchPage() {
           text-align: center;
         }
 
-        /* ── Quality selector ───────────────────────────────── */
         .ts-quality-wrap {
           position: absolute;
           top: 12px;
@@ -699,7 +857,6 @@ export default function WatchPage() {
           font-weight: 600;
         }
 
-        /* ── File info ──────────────────────────────────────── */
         .ts-info {
           padding: 16px 0 8px;
         }
@@ -733,7 +890,6 @@ export default function WatchPage() {
           color: var(--text-secondary, rgba(255,255,255,0.65));
         }
 
-        /* ── Download bar ───────────────────────────────────── */
         .ts-download-bar {
           display: flex;
           align-items: center;
@@ -767,7 +923,6 @@ export default function WatchPage() {
           max-width: 260px;
         }
 
-        /* ── Loading / Error ────────────────────────────────── */
         .ts-loading {
           display: flex;
           flex-direction: column;
@@ -807,7 +962,6 @@ export default function WatchPage() {
           margin: 0 0 12px;
         }
 
-        /* ── Mobile tweaks ──────────────────────────────────── */
         @media (max-width: 480px) {
           .ts-quality-btn span { display: none; }
           .ts-quality-btn { padding: 6px; }
