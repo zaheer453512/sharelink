@@ -4,36 +4,33 @@ import rateLimit from '@fastify/rate-limit';
 import helmet from '@fastify/helmet';
 import Redis from 'ioredis';
 import { resolveRoute } from './routes/resolve';
-import { downloadRoute } from './routes/download';
+import { downloadRoute, streamProxyRoute } from './routes/download'; // ← added streamProxyRoute
 import healthRoute from './routes/health';
 
 const app = Fastify({
   logger: {
     level: process.env.LOG_LEVEL || 'info',
-    transport: process.env.NODE_ENV !== 'production'
-      ? { target: 'pino-pretty', options: { colorize: true } }
-      : undefined,
+    transport:
+      process.env.NODE_ENV !== 'production'
+        ? { target: 'pino-pretty', options: { colorize: true } }
+        : undefined,
   },
 });
 
 // Redis connection
-export const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
-  maxRetriesPerRequest: 3,
-  retryStrategy: (times) => Math.min(times * 100, 3000),
-});
+export const redis = new Redis(
+  process.env.REDIS_URL || 'redis://localhost:6379',
+  {
+    maxRetriesPerRequest: 3,
+    retryStrategy: (times) => Math.min(times * 100, 3000),
+  }
+);
 
-redis.on('error', (err) => {
-  app.log.error(err, 'Redis connection error');
-});
-
-redis.on('connect', () => {
-  app.log.info('Redis connected');
-});
+redis.on('error',   (err) => app.log.error(err, 'Redis connection error'));
+redis.on('connect', ()    => app.log.info('Redis connected'));
 
 // Plugins
-app.register(helmet, {
-  contentSecurityPolicy: false, // Handled by Cloudflare
-});
+app.register(helmet, { contentSecurityPolicy: false });
 
 app.register(cors, {
   origin: process.env.FRONTEND_URL || 'http://localhost:3000',
@@ -54,12 +51,14 @@ app.register(rateLimit, {
   }),
 });
 
-// Internal key auth for Next.js API routes
+// Internal key auth
 app.addHook('onRequest', async (request, reply) => {
   const internalKey = request.headers['x-internal-key'];
-  if (process.env.INTERNAL_API_KEY && internalKey !== process.env.INTERNAL_API_KEY) {
-    // Only block on protected routes
-    const protectedPaths = ['/api/resolve', '/api/download'];
+  if (
+    process.env.INTERNAL_API_KEY &&
+    internalKey !== process.env.INTERNAL_API_KEY
+  ) {
+    const protectedPaths = ['/api/resolve', '/api/download', '/api/stream'];
     if (protectedPaths.includes(request.url.split('?')[0])) {
       reply.status(401).send({ error: 'Unauthorized' });
     }
@@ -67,9 +66,10 @@ app.addHook('onRequest', async (request, reply) => {
 });
 
 // Routes
-app.register(resolveRoute, { prefix: '/api' });
-app.register(downloadRoute, { prefix: '/api' });
-app.register(healthRoute, { prefix: '/api' });
+app.register(resolveRoute,    { prefix: '/api' });
+app.register(downloadRoute,   { prefix: '/api' });
+app.register(streamProxyRoute,{ prefix: '/api' }); // ← NEW: /api/stream
+app.register(healthRoute,     { prefix: '/api' });
 
 // Start server
 const start = async () => {
